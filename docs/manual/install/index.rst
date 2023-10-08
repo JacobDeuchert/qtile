@@ -1,6 +1,6 @@
-================
-Installing Qtile
-================
+============
+Installation
+============
 
 Distro Guides
 =============
@@ -116,6 +116,13 @@ With the dependencies in place, you can now install the stable version of qtile 
 
    pip install qtile
 
+Or with sets of dependencies:
+
+.. code-block:: bash
+
+   pip install qtile[wayland]  # for Wayland dependencies
+   pip install qtile[widgets]  # for all widget dependencies
+   pip install qtile[all]      # for all dependencies
 
 Or install qtile-git with:
 
@@ -178,10 +185,13 @@ Wayland
 
 Qtile can be run as a Wayland compositor rather than an X11 window manager. For
 this, Qtile uses wlroots_, a compositor library which is undergoing fast
-development. This means we can only support the latest release. Be aware that
-some distributions package outdated versions of wlroots. More up-to-date
-distributions such as Arch Linux may also package pywayland, pywlroots and
-python-xkbcommon.
+development. Be aware that some distributions package outdated versions of
+wlroots. More up-to-date distributions such as Arch Linux may package
+pywayland, pywlroots and python-xkbcommon. Also note that we may not have yet
+caught up with the latest wlroots release ourselves.
+
+.. note::
+   We currently support wlroots==0.16.0,<0.17.0 and pywlroots==0.16.4.
 
 With the Wayland dependencies in place, Qtile can be run either from a TTY, or
 within an existing X11 or Wayland session where it will run inside a nested
@@ -193,3 +203,8 @@ window:
 
 See the :ref:`Wayland <wayland>` page for more information on running Qtile as
 a Wayland compositor.
+
+Similar to the xsession example above, a wayland session file can be used to start qtile
+from a login manager. To use this, you should create a `qtile-wayland.desktop
+<https://github.com/qtile/qtile/blob/master/resources/qtile-wayland.desktop>`_ file in
+``/usr/share/wayland-sessions``.

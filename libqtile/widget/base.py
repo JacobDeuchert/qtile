@@ -42,6 +42,7 @@ from libqtile.command import interface
 from libqtile.command.base import CommandError, CommandObject, expose_command
 from libqtile.lazy import LazyCall
 from libqtile.log_utils import logger
+from libqtile.utils import create_task
 
 if TYPE_CHECKING:
     from typing import Any
@@ -108,7 +109,7 @@ class _Widget(CommandObject, configurable.Configurable):
     you need access to the qtile object, it needs to be imported into your code.
 
     ``lazy`` functions can also be passed as callback functions and can be used in
-    the same was as keybindings.
+    the same way as keybindings.
 
     For example:
 
@@ -138,14 +139,14 @@ class _Widget(CommandObject, configurable.Configurable):
 
     offsetx: int = 0
     offsety: int = 0
-    defaults = [
+    defaults: list[tuple[str, Any, str]] = [
         ("background", None, "Widget background color"),
         (
             "mouse_callbacks",
             {},
             "Dict of mouse button press callback functions. Accepts functions and ``lazy`` calls.",
         ),
-    ]  # type: list[tuple[str, Any, str]]
+    ]
 
     def __init__(self, length, **config):
         """
@@ -169,8 +170,9 @@ class _Widget(CommandObject, configurable.Configurable):
             raise confreader.ConfigError("Widget width must be an int")
 
         self.configured = False
-        self._futures: list[asyncio.TimerHandle] = []
+        self._futures: list[asyncio.Handle] = []
         self._mirrors: set[_Widget] = set()
+        self.finalized = False
 
     @property
     def length(self):
@@ -186,12 +188,12 @@ class _Widget(CommandObject, configurable.Configurable):
     def width(self):
         if self.bar.horizontal:
             return self.length
-        return self.bar.size - (self.bar.border_width[1] + self.bar.border_width[3])
+        return self.bar.width
 
     @property
     def height(self):
         if self.bar.horizontal:
-            return self.bar.size - (self.bar.border_width[0] + self.bar.border_width[2])
+            return self.bar.height
         return self.length
 
     @property
@@ -223,9 +225,18 @@ class _Widget(CommandObject, configurable.Configurable):
         self.qtile = qtile
         self.bar = bar
         self.drawer = bar.window.create_drawer(self.bar.width, self.bar.height)
+
+        # Clear this flag as widget may be restarted (e.g. if screen removed and re-added)
+        self.finalized = False
+
+        # Timers are added to futures list so they can be cancelled if the `finalize` method is
+        # called before the timers have fired.
         if not self.configured:
-            self.qtile.call_soon(self.timer_setup)
-            self.qtile.call_soon(asyncio.create_task, self._config_async())
+            timer = self.qtile.call_soon(self.timer_setup)
+            async_timer = self.qtile.call_soon(asyncio.create_task, self._config_async())
+
+            # Add these to our list of futures so they can be cancelled.
+            self._futures.extend([timer, async_timer])
 
     async def _config_async(self):
         """
@@ -244,6 +255,11 @@ class _Widget(CommandObject, configurable.Configurable):
         if hasattr(self, "layout") and self.layout:
             self.layout.finalize()
         self.drawer.finalize()
+        self.finalized = True
+
+        # Reset configuration status so the widget can be reconfigured
+        # e.g. when screen is re-added
+        self.configured = False
 
     def clear(self):
         self.drawer.set_source_rgb(self.bar.background)
@@ -326,6 +342,10 @@ class _Widget(CommandObject, configurable.Configurable):
         """
         This method calls ``.call_later`` with given arguments.
         """
+        # Don't add timers for finalised widgets
+        if self.finalized:
+            return
+
         future = self.qtile.call_later(seconds, self._wrapper, method, *method_args)
 
         self._futures.append(future)
@@ -341,16 +361,38 @@ class _Widget(CommandObject, configurable.Configurable):
 
     def _remove_dead_timers(self):
         """Remove completed and cancelled timers from the list."""
+
+        def is_ready(timer):
+            return timer in self.qtile._eventloop._ready
+
         self._futures = [
             timer
             for timer in self._futures
-            if not (timer.cancelled() or timer.when() < self.qtile._eventloop.time())
+            # Filter out certain handles...
+            if not (
+                timer.cancelled()
+                # Once a scheduled timer is ready to be run its _scheduled flag is set to False
+                # and it's added to the loop's `_ready` queue
+                or (
+                    isinstance(timer, asyncio.TimerHandle)
+                    and not timer._scheduled
+                    and not is_ready(timer)
+                )
+                # Callbacks scheduled via `call_soon` are put into the loop's `_ready` queue
+                # and are removed once they've been executed
+                or (isinstance(timer, asyncio.Handle) and not is_ready(timer))
+            )
         ]
 
     def _wrapper(self, method, *method_args):
         self._remove_dead_timers()
         try:
-            method(*method_args)
+            if asyncio.iscoroutinefunction(method):
+                create_task(method(*method_args))
+            elif asyncio.iscoroutine(method):
+                create_task(method)
+            else:
+                method(*method_args)
         except:  # noqa: E722
             logger.exception("got exception from widget timer")
 
@@ -452,6 +494,12 @@ class _TextBox(_Widget):
             "Whether text should scroll completely away (True) or stop when the end of the text is shown (False)",
         ),
         ("scroll_hide", False, "Whether the widget should hide when scrolling has finished"),
+        (
+            "scroll_fixed_width",
+            False,
+            "When ``scroll=True`` the ``width`` parameter is a maximum width and, when text is shorter than this, the widget will resize. "
+            "Setting ``scroll_fixed_width=True`` will force the widget to have a fixed width, regardless of the size of the text.",
+        ),
     ]  # type: list[tuple[str, Any, str]]
 
     def __init__(self, text=" ", width=bar.CALCULATED, **config):
@@ -552,7 +600,11 @@ class _TextBox(_Widget):
             self._is_scrolling = True
             self._should_scroll = True
         else:
-            self.length_type = bar.CALCULATED
+            if self.scroll_fixed_width:
+                self.length_type = bar.STATIC
+                self.length = self._scroll_width
+            else:
+                self.length_type = bar.CALCULATED
             self._should_scroll = False
 
     def calculate_length(self):
@@ -688,6 +740,13 @@ class _TextBox(_Widget):
 
     def update(self, text):
         """Update the widget text."""
+        # Don't try to update text in dead layouts
+        # This is mainly required for ThreadPoolText based widgets as the
+        # polling function cannot be cancelled and so may be called after the widget
+        # is finalised.
+        if not self.can_draw():
+            return
+
         if self.text == text:
             return
         if text is None:
@@ -716,8 +775,7 @@ class InLoopPollText(_TextBox):
         (
             "update_interval",
             600,
-            "Update interval in seconds, if none, the "
-            "widget updates whenever the event loop is idle.",
+            "Update interval in seconds, if none, the widget updates only once.",
         ),
     ]  # type: list[tuple[str, Any, str]]
 
@@ -772,7 +830,7 @@ class ThreadPoolText(_TextBox):
         (
             "update_interval",
             600,
-            "Update interval in seconds, if none, the " "widget updates whenever it's done.",
+            "Update interval in seconds, if none, the widget updates only once.",
         ),
     ]  # type: list[tuple[str, Any, str]]
 
@@ -794,13 +852,11 @@ class ThreadPoolText(_TextBox):
 
                     if self.update_interval is not None:
                         self.timeout_add(self.update_interval, self.timer_setup)
-                    else:
-                        self.timer_setup()
 
                 except Exception:
-                    logger.exception("Failed to reschedule.")
+                    logger.exception("Failed to reschedule timer for %s.", self.name)
             else:
-                logger.warning("poll() returned None, not rescheduling")
+                logger.warning("%s's poll() returned None, not rescheduling", self.name)
 
         self.future = self.qtile.run_in_executor(self.poll)
         self.future.add_done_callback(on_done)
