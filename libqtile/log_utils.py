@@ -36,7 +36,8 @@ if typing.TYPE_CHECKING:
     from logging import Logger, LogRecord
 
 logger = getLogger(__package__)
-
+def debug(any):
+    logger.debug(any)
 
 class ColorFormatter(Formatter):
     """Logging formatter adding console colors to the output."""

@@ -1699,7 +1699,8 @@ class Window(_Window, base.Window):
                 focus_behavior = self.qtile.config.focus_on_window_activation
                 if focus_behavior == "focus":
                     logger.debug("Focusing window")
-                    self.qtile.current_screen.set_group(self.group)
+                    if (self.group.screen == None):
+                        self.qtile.current_screen.set_group(self.group)
                     self.group.focus(self)
                 elif focus_behavior == "smart":
                     if not self.group.screen:

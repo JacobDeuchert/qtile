@@ -258,7 +258,7 @@ class _Group(CommandObject):
             win._float_state = FloatStates.FLOATING
         if win.floating and not win.fullscreen:
             self.floating_layout.add_client(win)
-        if not win.floating or win.fullscreen:
+        if not win.floating or win.fullscreen or win.maximized:
             self.tiled_windows.add(win)
             for i in self.layouts:
                 i.add_client(win)
@@ -280,7 +280,7 @@ class _Group(CommandObject):
                 or self.floating_layout.focus_first(group=self)
             )
         # Remove from the tiled layouts if it was not floating or fullscreen
-        if not win.floating or win.fullscreen:
+        if not win.floating or win.fullscreen or win.maximized:
             for i in self.layouts:
                 if i is self.layout:
                     nextfocus = i.remove(win)
